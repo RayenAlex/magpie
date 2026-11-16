@@ -138,19 +138,27 @@ jobs:
         run: |
           echo "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "bad candidate sha: $CANDIDATE_SHA"; exit 1; }
           docker build --load --build-arg VERSION=prewalk-"$CANDIDATE_SHA" -t magpie-prewalk-smoke .
+          smoke_key=$(openssl rand -hex 24)
+          echo "::add-mask::$smoke_key"
+          printf '%s' "$smoke_key" | docker run --rm -i -v smoke-ci:/config \
+            magpie-prewalk-smoke gateway-key add ci-smoke --key - >/dev/null
           docker run -d --name smoke -v smoke-ci:/config -p 13425:3425 magpie-prewalk-smoke
           ready=0
           for _ in $(seq 1 30); do
-            if curl -s -o /dev/null http://127.0.0.1:13425/v1/models; then ready=1; break; fi
+            if curl -fsS -o /dev/null -H "Authorization: Bearer $smoke_key" \
+              http://127.0.0.1:13425/v1/models; then ready=1; break; fi
             sleep 1
           done
           [ "$ready" = 1 ]
+          unauthenticated_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:13425/v1/models)
+          [ "$unauthenticated_code" = 401 ]
           models_code=$(curl -s -o /tmp/models.json -w '%{http_code}' \
-            -H 'Authorization: Bearer magpie' http://127.0.0.1:13425/v1/models)
+            -H "Authorization: Bearer $smoke_key" http://127.0.0.1:13425/v1/models)
           echo "v1/models answered HTTP $models_code"
           [ "$models_code" = 200 ]
           chat_code=$(curl -s -o /tmp/body.json -w '%{http_code}' \
-            -H 'Authorization: Bearer magpie' -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $smoke_key" -H 'Content-Type: application/json' \
             -d '{"model":"ci-unknown-model","messages":[{"role":"user","content":"hi"}]}' \
             http://127.0.0.1:13425/v1/chat/completions)
           echo "chat/completions answered HTTP $chat_code"

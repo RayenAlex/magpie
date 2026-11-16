@@ -36,8 +36,11 @@ on demand. One run does everything, in this order:
    show each test passing with no skipped test or subtest — without Bun the
    loop test skips, and that fails the run rather than quietly not running.
    Bun 1.4.2 is checked by version first.
-4. A local single-arch Docker build is smoke-tested: `/v1/models` answers
-   200, an unknown model answers 4xx with an `error.type`.
+4. A local single-arch Docker build is smoke-tested with an ephemeral
+   gateway key created through `gateway-key add` in the disposable volume:
+   `/v1/models` answers 401 without a key and 200 with it, and an unknown
+   model answers 4xx with an `error.type`. The host-to-container request is
+   remote, so the loopback-only default token is not valid here.
 5. The multi-platform image (`linux/amd64,linux/arm64`, QEMU) is pushed with
    the candidate tag `prewalk-<sha>`, built from the same candidate sha.
    Publication uses the build output digest, not a later tag lookup; GHCR
