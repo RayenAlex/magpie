@@ -1,0 +1,203 @@
+name: Prewalk sync
+
+# RayenAlex/magpie's maintenance pipeline: every 6 hours (and on every push
+# to main or prewalk-maintenance) merge the fork's main and yetone/magpie's
+# main into prewalk-maintenance, check the candidate, and only then advance
+# both fork branches and move the prewalk-latest image. Nothing here deploys
+# anything.
+#
+# The whole pipeline is one workflow on purpose: a push made with
+# GITHUB_TOKEN triggers no other workflow, so no later run would pick the
+# merge up — this run does the checks itself, before and after nothing.
+# See docs/prewalk-maintenance.md for the rules and the failure edges.
+
+on:
+  push:
+    branches: [main, prewalk-maintenance]
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: prewalk-sync
+  cancel-in-progress: false
+
+env:
+  FORK_URL: https://github.com/RayenAlex/magpie.git
+  UPSTREAM_URL: https://github.com/yetone/magpie.git
+  # lowercase on purpose: ghcr.io rejects RayenAlex
+  IMAGE: ghcr.io/rayenalex/magpie
+
+jobs:
+  sync:
+    # a hard guard: on yetone/magpie this would merge the repo into itself
+    # and push over yetone's own branches and image
+    if: github.repository == 'RayenAlex/magpie'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: write  # advance pushes main and prewalk-maintenance
+      packages: write  # the candidate image goes to ghcr.io
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # the merge needs the full history
+          persist-credentials: true  # advance pushes with GITHUB_TOKEN
+
+      # prepare merges upstream main into the fork's prewalk-maintenance
+      # (or main on a fresh fork), leaves HEAD on the candidate and writes
+      # its sha to prewalk_sha. A conflict fails the run here; no remote
+      # is written until advance, the last push of the run.
+      - name: Prepare the candidate (merge upstream main)
+        id: prepare
+        run: build/prewalk-sync.sh prepare --origin-url "$FORK_URL" --upstream-url "$UPSTREAM_URL"
+
+      # The sync logic itself, in throwaway local repositories: upstream,
+      # fork, a racing client, no network, nothing outside a temp dir.
+      - name: Test the sync script (throwaway local repos)
+        timeout-minutes: 10
+        run: bash build/prewalk-sync-test.sh
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # the repo's pinned Bun (as in test.yml), so the plugin tests run for
+      # real instead of skipping
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      # Patch-scoped checks only, by the owner's decision: this fork gates
+      # its own patches, and upstream's own problems stay with the
+      # maintainers. gofmt covers just the Go files the fork's patch
+      # changes (the fork's diff against upstream main after prepare; the
+      # prewalk-upstream remote is prepare's), vet the packages it touches.
+      # No whole-tree test run here.
+      - name: Check the patch (gofmt on changed files, vet on touched packages)
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          isolated_home=$(mktemp -d)
+          trap 'chmod -R u+w "$isolated_home"; rm -rf "$isolated_home"' EXIT
+          gopath=$(go env GOPATH)
+          modcache=$(go env GOMODCACHE)
+          buildcache=$(go env GOCACHE)
+          isolated() {
+            HOME="$isolated_home" GOPATH="$gopath" GOMODCACHE="$modcache" GOCACHE="$buildcache" "$@"
+          }
+          mapfile -t patched_files < <(git diff --name-only --diff-filter=ACMR \
+            refs/remotes/prewalk-upstream/main...HEAD -- '*.go')
+          echo "patched Go files (${#patched_files[@]}):"
+          printf '%s\n' "${patched_files[@]:-<none>}"
+          if [ "${#patched_files[@]}" -gt 0 ]; then
+            bad=$(isolated gofmt -l "${patched_files[@]}")
+            if [ -n "$bad" ]; then
+              echo "not gofmt'd:"; echo "$bad"; exit 1
+            fi
+          fi
+          isolated go vet -tags nogui \
+            ./internal/gateway/ ./internal/plugin/ ./internal/usage/ \
+            ./internal/budget/ ./internal/gui/
+
+      # The fork's own patch tests, nothing broader (the owner's decision;
+      # upstream's problems are the maintainers' to fix). JSON results must
+      # show each named test passing with no skipped test or subtest, so a
+      # missing Bun (the loop test skips without it) fails the run instead
+      # of quietly not running.
+      - name: Verify the patch tests actually run
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          bun --version
+          test "$(bun --version)" = 1.4.2
+          isolated_home=$(mktemp -d)
+          trap 'chmod -R u+w "$isolated_home"; rm -rf "$isolated_home"' EXIT
+          export GOPATH="$(go env GOPATH)" GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)"
+          export HOME="$isolated_home"
+          tests='^(TestPluginForwardUsageThroughHost|TestPluginForwardGrantBoundaries|TestProviderWrapperKeepsAuditButCountsNoConsumption|TestProviderWrapperPreservesCallerTokenBudget|TestContextCountsProviderForwardingChildOnce|TestPluginPageReadsGroups)$'
+          go test -v -json -timeout 20m -tags nogui -count=1 -run "$tests" \
+            ./internal/gateway/ ./internal/usage/ \
+            ./internal/budget/ ./internal/gui/ | tee "$RUNNER_TEMP/prewalk-tests.jsonl"
+          jq -s -e '
+            [ .[] | select(.Action == "skip" and .Test != null) ] as $skips |
+            [ .[] | select(.Action == "pass" and .Test != null) | .Test ] as $passes |
+            ($skips | length == 0) and
+            (["TestPluginForwardUsageThroughHost", "TestPluginForwardGrantBoundaries",
+              "TestProviderWrapperKeepsAuditButCountsNoConsumption", "TestProviderWrapperPreservesCallerTokenBudget",
+              "TestContextCountsProviderForwardingChildOnce", "TestPluginPageReadsGroups"] - $passes | length == 0)
+          ' "$RUNNER_TEMP/prewalk-tests.jsonl"
+
+      # A local single-arch build first: if the image can't serve, the
+      # multi-platform push below never happens and prewalk-latest stays
+      # where it was.
+      - name: Smoke test the image (local build)
+        timeout-minutes: 45
+        env:
+          CANDIDATE_SHA: ${{ steps.prepare.outputs.prewalk_sha }}
+        run: |
+          echo "$CANDIDATE_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "bad candidate sha: $CANDIDATE_SHA"; exit 1; }
+          docker build --load --build-arg VERSION=prewalk-"$CANDIDATE_SHA" -t magpie-prewalk-smoke .
+          docker run -d --name smoke -v smoke-ci:/config -p 13425:3425 magpie-prewalk-smoke
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:13425/v1/models; then ready=1; break; fi
+            sleep 1
+          done
+          [ "$ready" = 1 ]
+          models_code=$(curl -s -o /tmp/models.json -w '%{http_code}' \
+            -H 'Authorization: Bearer magpie' http://127.0.0.1:13425/v1/models)
+          echo "v1/models answered HTTP $models_code"
+          [ "$models_code" = 200 ]
+          chat_code=$(curl -s -o /tmp/body.json -w '%{http_code}' \
+            -H 'Authorization: Bearer magpie' -H 'Content-Type: application/json' \
+            -d '{"model":"ci-unknown-model","messages":[{"role":"user","content":"hi"}]}' \
+            http://127.0.0.1:13425/v1/chat/completions)
+          echo "chat/completions answered HTTP $chat_code"
+          cat /tmp/body.json; echo
+          [ "$chat_code" -ge 400 ] && [ "$chat_code" -lt 500 ]
+          jq -e '.error.type' /tmp/body.json > /dev/null
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # A candidate tag may remain after a rejected advance. The build's
+      # digest, not this mutable tag, identifies the image for publication.
+      - name: Build and push the candidate image
+        id: image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          push: true
+          tags: ${{ env.IMAGE }}:prewalk-${{ steps.prepare.outputs.prewalk_sha }}
+          build-args: |
+            VERSION=prewalk-${{ steps.prepare.outputs.prewalk_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # advance fast-forwards both fork branches to the same verified sha
+      # the checks ran on; a branch that moved ahead rejects the run
+      - name: Advance the fork branches to the verified candidate
+        env:
+          CANDIDATE_SHA: ${{ steps.prepare.outputs.prewalk_sha }}
+        run: build/prewalk-sync.sh advance --sha "$CANDIDATE_SHA" --origin-url "$FORK_URL"
+
+      # last, and only now: prewalk-latest follows the candidate's digest
+      - name: Point prewalk-latest at the candidate image
+        env:
+          CANDIDATE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          latest="$IMAGE:prewalk-latest"
+          docker buildx imagetools create -t "$latest" "$IMAGE@$CANDIDATE_DIGEST"
+          got=$(docker buildx imagetools inspect "$latest" --format '{{json .}}' | jq -er '.manifest.digest')
+          echo "candidate $CANDIDATE_DIGEST, latest $got"
+          [ "$CANDIDATE_DIGEST" = "$got" ]
