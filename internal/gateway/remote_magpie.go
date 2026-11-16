@@ -97,6 +97,7 @@ type callerCtx struct{}
 func withCaller(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := callerFrom(r)
+		r, c = acceptPluginForward(r, c)
 		if c.hops >= catalog.MaxVia {
 			writeError(w, protoOfPath(r.URL.Path), http.StatusLoopDetected, "this request went round magpies that are each other's Remote magpie "+strconv.Itoa(c.hops)+" times: on one of them, turn off or remove the Remote magpie provider that points back")
 			return

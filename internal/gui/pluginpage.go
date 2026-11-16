@@ -629,6 +629,22 @@ func pageRead(read string, params map[string]any) (any, error) {
 			out = append(out, prov{ID: p.ID, Name: p.Name})
 		}
 		return out, nil
+	case "groups:list":
+		// an id, a name and the ref a target would use: no members,
+		// rules, keys or accounts, and no group the user removed
+		type group struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Ref  string `json:"ref"`
+		}
+		out := []group{}
+		for _, g := range provider.Groups() {
+			if g.Hidden {
+				continue
+			}
+			out = append(out, group{ID: g.ID, Name: g.Name, Ref: provider.GroupPrefix + g.ID})
+		}
+		return out, nil
 	case "usage:day":
 		// one day, or a span of them, by agent and model (pageday.go)
 		return pageDay(params)

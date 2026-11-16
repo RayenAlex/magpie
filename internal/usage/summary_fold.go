@@ -224,7 +224,7 @@ func (c *summaryCounts) freeze() summaryCounts {
 }
 
 func (c *summaryCounts) add(u *summaryRun, k *summaryKeying, r Record) {
-	if r.IsRejected() {
+	if r.IsRejected() || r.IsWrapper() {
 		return
 	}
 	t := r.Time.In(u.now.Location())

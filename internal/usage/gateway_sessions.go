@@ -455,7 +455,7 @@ func sortGatewaySessions(out []GatewaySession) {
 // not nil.
 func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]bool, alias func(string) string, priceOf func(Record) *catalog.Price, base map[gatewayKey]GatewaySession, own map[gatewayKey]*gatewayAcc, daily map[gatewayDayKey]*GatewayDayUsage, keep keptStrings) {
 	visitBlocks(blocks, since, func(r Record) {
-		if r.IsRejected() || r.IsReported() || r.Session == "" {
+		if r.IsRejected() || r.IsReported() || r.IsWrapper() || r.Session == "" {
 			return
 		}
 		a := keep.of(ReportedAs(r.Agent))

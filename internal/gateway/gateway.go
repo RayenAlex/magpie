@@ -60,6 +60,9 @@ func TokenFor(agent string) string { return Token + "-" + agent }
 // agentOf is the agent a request came from: the one its token names
 // (TokenFor), else the one its User-Agent does.
 func agentOf(r *http.Request) string {
+	if child, ok := r.Context().Value(pluginChildKey{}).(pluginForwardChild); ok && child.kind == "business" {
+		return child.grant.caller.agent
+	}
 	if id := pathAgent(r); id != "" {
 		return id
 	}
@@ -2524,6 +2527,7 @@ func estimate(req *Request) int {
 
 // serve routes one parsed-enough request to its provider.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
+	r = beginPluginForward(r)
 	start := time.Now()
 	// a client's "off" is magpie's none, for every route and check below
 	// that reads the body's effort (plugins#334)
@@ -2600,7 +2604,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	who, agent := callerOf(r), agentOf(r)
 	metadata := requestSessionMetadata(r.Header, body)
 	var clientResponseID string // only a reply released to the client owns this ID
-	call := Call{Time: start, From: from, Model: unprefixed(modelOf(body)), Agent: who.agent, Via: who.via, Kind: requestCallKind(r.Header, metadata),
+	call := Call{Time: start, From: from, Model: unprefixed(modelOf(body)), Agent: who.agent, Via: who.via, Kind: pluginForwardKind(r, requestCallKind(r.Header, metadata)),
 		wire: archiving(r, capture, start, nil), headers: headerLogOf(r.Context())}
 	// an agent compacting its conversation is recorded as the compaction
 	// it is, as Codex's are by their header: Claude Code's compaction is a
@@ -3584,7 +3588,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		capture.tools = tools
 	}
 	tierAsked := bodyTier(from, body) // the service tier the client asked for (#1784)
-	tr := s.trace.beginFor(r, Route{turn: turn, dirOf: dirOf(from, plain), tools: tools, imageTurn: drawingTurnID(metadata.Turn), imageCaller: codexTurnKey(r, call.Agent), TitleLink: link, Pinned: pinnedName(pin), Time: start, Agent: call.Agent, Session: sessionOf(r.Header), Conv: convOf(r.Header, body), LastConvs: dshLastConvs(call.Agent, body), ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Tier: tierAsked, Provider: p.ID, Group: group, Rule: hit, Nested: nested, SealedTask: sealedTask, LeadAccount: leadAccount, Compaction: compactionWho(checkpoint), Subagent: subagent, Moved: moved, SubagentEffort: subagentEffort, Sub: subOf(r.Header), SubagentID: subagentID, Affinity: shown, Order: pl.order, Left: append(slices.Clip(pl.left), smallW...)})
+	tr := s.trace.beginFor(r, Route{turn: turn, dirOf: dirOf(from, plain), tools: tools, imageTurn: drawingTurnID(metadata.Turn), imageCaller: codexTurnKey(r, call.Agent), TitleLink: link, Pinned: pinnedName(pin), Time: start, Agent: call.Agent, Session: pluginForwardSession(r, sessionOf(r.Header)), Conv: convOf(r.Header, body), LastConvs: dshLastConvs(call.Agent, body), ParentSession: titleParentSession(r.Header, metadata, call.Kind), Kind: call.Kind, For: call.For, Model: call.Model, Effort: requestEffort(from, body), Tier: tierAsked, Provider: p.ID, Group: group, Rule: hit, Nested: nested, SealedTask: sealedTask, LeadAccount: leadAccount, Compaction: compactionWho(checkpoint), Subagent: subagent, Moved: moved, SubagentEffort: subagentEffort, Sub: subOf(r.Header), SubagentID: subagentID, Affinity: shown, Order: pl.order, Left: append(slices.Clip(pl.left), smallW...)})
 	if watched != nil {
 		watched.routeID = tr.ID
 	}
@@ -5738,7 +5742,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			link.Reply = replyDigest
 			t.TitleLink = &link
 		}
-		if call.To != "" {
+		t.ProviderWrapper = pluginWrapped(r.Context(), call.Provider)
+		if call.To != "" && !t.ProviderWrapper {
 			t.Usage = append(t.Usage, routeUsage(call.Provider, model, call.Usage)...)
 		}
 		t.Tokens = call.Usage.Input + call.Usage.Output + call.Usage.CacheRead + call.Usage.CacheWrite
@@ -6479,7 +6484,9 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			}
 		}
 	}
+	forwardDone := func() {}
 	if p.IsPlugin() {
+		forwardDone = tellPluginForward(ctx, p, in, req.Header)
 		req.Header.Set(provider.ConversationHeader, conversationID(in, body))
 		// the session and subagent the agent named, for a plugin that
 		// keeps state per conversation (plugins#620)
@@ -6508,6 +6515,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		passOnUA(req, ua)
 		markSearching(ctx, req)
 	}
+	defer forwardDone()
 	if err := p.Sign(ctx, req, to, body); err != nil {
 		return nil, err
 	}

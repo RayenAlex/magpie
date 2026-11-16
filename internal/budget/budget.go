@@ -200,7 +200,11 @@ func read(keyID string, start time.Time, l *access.Limit) *sums {
 	usage.Visit(start, func(r usage.Record) {
 		// a key issued under keyID spends from its limits too
 		if (r.CallerKeyID == keyID || r.CallerIssuerID == keyID) && counts(r) && !r.Time.Before(start) && s.counts(r) {
-			c, ok := cost(r)
+			priced := r
+			if r.IsWrapper() {
+				priced.Operation = ""
+			}
+			c, ok := cost(priced)
 			s.add(r, c, ok)
 		}
 	})
@@ -245,7 +249,11 @@ func Append(rec usage.Record) {
 		if cost == nil {
 			cost = usage.NewCoster()
 		}
-		c, ok := cost(rec)
+		priced := rec
+		if rec.IsWrapper() {
+			priced.Operation = ""
+		}
+		c, ok := cost(priced)
 		for _, s := range kept {
 			if !rec.Time.Before(s.start) && s.counts(rec) {
 				s.add(rec, c, ok)

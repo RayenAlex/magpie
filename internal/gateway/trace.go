@@ -68,26 +68,27 @@ type Route struct {
 	// window: the context window of the model the try under way went to,
 	// known as it goes out, so a request still answering shows how full
 	// its window is (livePrompt) and not only once it is done
-	window        int
-	Seq           int64        `json:"seq"` // the trace's count when it last changed
-	ID            int64        `json:"id"`
-	Time          time.Time    `json:"time"`
-	Agent         string       `json:"agent"`
-	ParentSession string       `json:"parentSession,omitempty"` // title helper's explicit originating chat; does not affect routing
-	Session       string       `json:"session,omitempty"`       // the client's session id, never inferred from its model or account
-	TitleLink     *TitleLink   `json:"titleLink,omitempty"`     // digests only; display evidence, never account affinity
-	ParentMatched bool         `json:"parentMatched,omitempty"` // parent inferred for this view, not supplied by Codex
-	Usage         []RouteUsage `json:"usage,omitempty"`         // token tiers of billable tries; priced when read
-	Kind          string       `json:"kind,omitempty"`          // what the call is for, as Call's
-	For           *CallFor     `json:"for,omitempty"`           // the request it was made for, as Call's
-	Model         string       `json:"model"`                   // as the agent asked
-	Effort        string       `json:"effort,omitempty"`        // the reasoning the agent asked for; "" for none
-	Tier          string       `json:"tier,omitempty"`          // the service tier the agent asked for (bodyTier); "" for none
-	Provider      string       `json:"provider"`                // the provider the model resolved to
-	Group         *GroupRef    `json:"group,omitempty"`         // the routing group the agent asked for
-	Rule          *RuleHit     `json:"rule,omitempty"`          // the group's rules for it, when it has any
-	SealedTask    bool         `json:"sealedTask,omitempty"`    // only ChatGPT accounts can read this subagent's task
-	LeadAccount   string       `json:"leadAccount,omitempty"`   // the parent account put first for a sealed task
+	window          int
+	Seq             int64        `json:"seq"` // the trace's count when it last changed
+	ID              int64        `json:"id"`
+	Time            time.Time    `json:"time"`
+	Agent           string       `json:"agent"`
+	ProviderWrapper bool         `json:"providerWrapper,omitempty"` // usage belongs to a verified forwarding child
+	ParentSession   string       `json:"parentSession,omitempty"`   // title helper's explicit originating chat; does not affect routing
+	Session         string       `json:"session,omitempty"`         // the client's session id, never inferred from its model or account
+	TitleLink       *TitleLink   `json:"titleLink,omitempty"`       // digests only; display evidence, never account affinity
+	ParentMatched   bool         `json:"parentMatched,omitempty"`   // parent inferred for this view, not supplied by Codex
+	Usage           []RouteUsage `json:"usage,omitempty"`           // token tiers of billable tries; priced when read
+	Kind            string       `json:"kind,omitempty"`            // what the call is for, as Call's
+	For             *CallFor     `json:"for,omitempty"`             // the request it was made for, as Call's
+	Model           string       `json:"model"`                     // as the agent asked
+	Effort          string       `json:"effort,omitempty"`          // the reasoning the agent asked for; "" for none
+	Tier            string       `json:"tier,omitempty"`            // the service tier the agent asked for (bodyTier); "" for none
+	Provider        string       `json:"provider"`                  // the provider the model resolved to
+	Group           *GroupRef    `json:"group,omitempty"`           // the routing group the agent asked for
+	Rule            *RuleHit     `json:"rule,omitempty"`            // the group's rules for it, when it has any
+	SealedTask      bool         `json:"sealedTask,omitempty"`      // only ChatGPT accounts can read this subagent's task
+	LeadAccount     string       `json:"leadAccount,omitempty"`     // the parent account put first for a sealed task
 	// Compaction: the key or account that sealed the native compaction
 	// the request carries, the only one it went to (#1099): Routing says
 	// so, not that it is the only one on for the model (#2639)

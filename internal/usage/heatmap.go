@@ -77,7 +77,7 @@ type heatDays struct {
 
 // add adds r to its day in loc, unless the heatmap doesn't count it.
 func (h *heatDays) add(r *Row, since time.Time, loc *time.Location) {
-	if r.IsRejected() || r.IsProbe() || r.Time.Before(since) {
+	if r.IsRejected() || r.IsProbe() || r.IsWrapper() || r.Time.Before(since) {
 		return
 	}
 	if h.at == nil {

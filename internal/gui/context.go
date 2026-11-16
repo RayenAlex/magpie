@@ -202,6 +202,10 @@ func recOf(r gateway.Route, whole bool) ctxRec {
 		Session: r.Session, Parent: r.ParentSession, Conv: r.Conv, ResponseID: r.ResponseID, Done: r.Done,
 		Failed: r.Status >= 400 || r.Error != "", Canceled: usage.CanceledBy(r.Status, r.Error),
 		Cache: cacheOf(r), CacheKnown: cacheKnown(r)}
+	if r.ProviderWrapper {
+		c.Done = false // its verified child is the actual model call
+		return c
+	}
 	if p := r.Prompt; p != nil {
 		c.Asked = p.Tokens > 0
 		c.Tokens, c.Window, c.Counted = p.Tokens, p.Window, p.Counted

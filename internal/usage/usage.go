@@ -26,6 +26,13 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
+// OperationProviderWrapper keeps the client's usage for audit and caller
+// budgets, while the verified child records own the actual consumption.
+const OperationProviderWrapper = "provider_wrapper"
+
+// IsWrapper is a verified provider forwarding envelope, not a model call.
+func (r Record) IsWrapper() bool { return r.Operation == OperationProviderWrapper }
+
 // Record is one call.
 type Record struct {
 	Operation       string    `json:"operation,omitempty"`
@@ -551,6 +558,9 @@ var Periods = []Period{Today, Week, Month, All}
 // off-peak price doubles at peak, Price.In). A reported call that said
 // what it cost costs that, at any price.
 func (r Record) CostAt(p catalog.Price) float64 {
+	if r.IsWrapper() {
+		return 0
+	}
 	if r.OwnCost != nil {
 		return *r.OwnCost // a reported call's own cost (#1874)
 	}
@@ -922,6 +932,9 @@ func (t *Totals) add(r Record, price *catalog.Price) { t.addFrom(Row{Record: r},
 // it (a Codex turn of one call read from its session file, by its own rule).
 func (t *Totals) addFrom(row Row, price *catalog.Price) {
 	r := row.Record
+	if r.IsWrapper() {
+		return
+	}
 	t.count(r)
 	t.Input += r.Input
 	t.Output += r.Output
@@ -1036,7 +1049,7 @@ type OwnShare struct {
 
 // addOwn counts r in g's own share when magpie made it by itself.
 func (g *Group) addOwn(r Record, price *catalog.Price) {
-	if !r.ByMagpie() {
+	if r.IsWrapper() || !r.ByMagpie() {
 		return
 	}
 	if !r.HandedOn {

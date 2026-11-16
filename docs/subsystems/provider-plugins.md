@@ -170,6 +170,14 @@ So `forwardOnce` sets two more headers on every plugin request, each dropped fir
 
 `unsaid` in `host.js` takes both off whatever the plugin sends on. Devin 0.1.34 keys its keepalive by them. `TestPluginToldTheSession` ([`plugin_session_test.go`](../../internal/gateway/plugin_session_test.go)) sends Claude Code's lead and subagent, a caller's `X-Magpie-Session`, OpenCode's header and none, to a relayed Anthropic model and a translated Chat one, unstreamed, and checks what the plugin read and that the vendor got neither header.
 
+## Provider 回环的来源与计量
+
+插件 fetch 若把业务转发回本机网关，可以使用宿主签发的 `x-magpie-plugin-token`，配合 `x-magpie-plugin-call: business` 关联原请求（[`plugin_forward.go`](../../internal/gateway/plugin_forward.go)）。凭证仅在这次插件 fetch 返回响应头前有效，每个凭证只接受一次业务关联；请求仍须通过独立 gateway key 鉴权，来源关联不继承权限。网关拒绝外部、代理、无身份、伪造、重复及过期关联，且在入口移除关联头。插件 host 仅向 `MAGPIE_ADDR` 的 `/v1/chat/completions` 放行关联头，其他目标及重定向均去除；凭证不写入账本。
+
+内层业务记录和路由判断使用原客户端来源，记账使用原客户端会话及子代理标识；插件显式指定的路由会话保留，与记账会话分离，避免破坏组递归哨兵。已核验的外层账本带 `operation: provider_wrapper`，保留真实 usage、入口身份和入口预算累计，但不再次计入实际消耗、会话聚合及上下文统计。内层保持服务身份和真实模型费用。分类和健康判断通过同一凭证分别声明 `prewalk_classify`、`prewalk_health`，记录为插件辅助调用并独立累计消耗，不触发包装去重。
+
+未配合的插件和旧宿主维持原行为；既有账本不迁移，也不按时间、token 或模型相同推测关联。验证：`TestPluginForwardGrantBoundaries`、usage/budget 的 `TestProviderWrapper*`、GUI 的 `TestContextCountsProviderForwardingChildOnce`，以及 Prewalk 仓库的实际插件网关集成测试。
+
 ## Whether another candidate follows
 
 A free model's vendor may queue a request for minutes: Qoder answers its code 10605 and its plugin waits in Qoder's queue as Qoder's client does (up to 4 minutes), CodeArts answers a 429 with `queue-status: queued` and its plugin polls the trace for up to 5 minutes. While another account, provider or routing group member could answer at once, that wait only keeps the agent waiting (axuhere on X: "模型请求正在排队 · 预计等待超过 10 分钟").

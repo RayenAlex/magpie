@@ -864,9 +864,13 @@ func accountOf(p provider.Provider) string {
 }
 
 func appendUsage(r *http.Request, rec usage.Record) {
+	if pluginWrapped(r.Context(), rec.Provider) {
+		rec.Operation = usage.OperationProviderWrapper
+	}
 	if rec.Session == "" {
 		rec.Session = sessionOf(r.Header)
 	}
+	rec.Session = pluginForwardSession(r, rec.Session)
 	if rec.Subagent == "" {
 		rec.Subagent, rec.ParentAgent = subagentOf(r.Header)
 	}

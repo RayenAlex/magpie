@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -330,6 +331,59 @@ func TestPluginPageNoAPI(t *testing.T) {
 		if code := ask(c); code != 200 {
 			t.Errorf("%v: %d", c, code)
 		}
+	}
+}
+
+// A page reading groups:list gets the groups' ids, names and refs: no
+// members, rules, keys or accounts, and no group the user removed.
+func TestPluginPageReadsGroups(t *testing.T) {
+	on, _ := pagePlugins(t)
+	manifest := filepath.Join(on, "package.json")
+	contents, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := strings.Replace(string(contents), `["usage:summary"]`, `["usage:summary", "groups:list"]`, 1)
+	if declared == string(contents) {
+		t.Fatal("page fixture has no usage:summary permission")
+	}
+	if err := os.WriteFile(manifest, []byte(declared), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{ID: "prewalk", Name: "Prewalk", Match: []string{"*/*"}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, _ := json.Marshal(on)
+	r := httptest.NewRequest("POST", "/api/plugin-pages/read", strings.NewReader(`{"spec":`+string(spec)+`,"read":"groups:list"}`))
+	r.Header.Set("Content-Type", "application/json")
+	w := do(pageMux(), r)
+	var got []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		Ref  string `json:"ref"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil {
+		t.Fatalf("groups:list: %d %s", w.Code, w.Body)
+	}
+	if len(got) != 1 || got[0].ID != "prewalk" || got[0].Name != "Prewalk" || got[0].Ref != "group/prewalk" {
+		t.Fatalf("groups:list gave %+v", got)
+	}
+	var fields []map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields[0]) != 3 {
+		t.Fatalf("groups:list exposed fields beyond id/name/ref: %s", w.Body)
+	}
+	// The permission must be declared by this plugin, not only recognized
+	// by the host; removing it cannot leave the read available.
+	if err := os.WriteFile(manifest, contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r = httptest.NewRequest("POST", "/api/plugin-pages/read", strings.NewReader(`{"spec":`+string(spec)+`,"read":"groups:list"}`))
+	r.Header.Set("Content-Type", "application/json")
+	if denied := do(pageMux(), r); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `doesn't ask to read \"groups:list\"`) {
+		t.Fatalf("undeclared groups:list: %d %s", denied.Code, denied.Body)
 	}
 }
 

@@ -897,6 +897,9 @@ func bucketIndex(bucket string, since, t time.Time) int {
 
 // addRow adds a ledger row, at the cost it already has.
 func (t *Totals) addRow(r Row) {
+	if r.IsWrapper() {
+		return
+	}
 	if r.TTFT > 0 && r.Answered() {
 		t.Timed++
 		t.TTFT += r.TTFT
@@ -1207,6 +1210,9 @@ type Part struct {
 
 // add counts a row in the part.
 func (p *Part) add(r Row) {
+	if r.IsWrapper() {
+		return
+	}
 	if !r.HandedOn {
 		p.Calls++
 	}

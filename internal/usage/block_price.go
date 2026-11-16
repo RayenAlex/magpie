@@ -326,6 +326,11 @@ func (b *blockPricer) priceBlock(packed *rowChunk) (*rowChunk, *[]packedRow) {
 		}
 		p.Shape = got.id
 		p.Flags = p.Flags&^(1|2|32) | got.flags
+		if c.Strings[c.text(p, rowOperation)] == OperationProviderWrapper {
+			p.Cost = 0
+			p.Flags |= 1
+			continue
+		}
 		if p.Flags&rowOwnCost != 0 {
 			// a reported call that said what it cost costs that (#1874)
 			if p.Tokens[0]+p.Tokens[1] > 0 {

@@ -575,7 +575,8 @@ async function followed(input, init) {
   const replayable = body == null || !(body instanceof ReadableStream)
   const bare = () => body == null && [...headers.keys()].every((k) => BARE_HEADERS.has(k))
   for (let n = 0; ; n++) {
-    const res = await hop(url, { ...opts, method, headers, body, redirect: "manual" })
+    const [target, request] = unsaid(url, { ...opts, method, headers, body, redirect: "manual" })
+    const res = await hop(target, request)
     const at = res.headers.get("location")
     if (!REDIRECTS.has(res.status) || at == null) return n ? said(res, url) : res
     let next
@@ -734,16 +735,29 @@ function asked(input, init) {
 // the headers it was given sends them nowhere.
 const MAGPIE_ONLY = ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort"]
 
+const PLUGIN_FORWARD_HEADERS = ["x-magpie-plugin-token", "x-magpie-plugin-call"]
+
+function pluginGatewayURL(input) {
+  try {
+    const u = new URL(input instanceof Request ? input.url : String(input))
+    const gateway = new URL(`http://${process.env.MAGPIE_ADDR}`)
+    return u.origin === gateway.origin && u.pathname === "/v1/chat/completions"
+  } catch {
+    return false
+  }
+}
+
 function unsaid(input, init) {
-  if (input instanceof Request && MAGPIE_ONLY.some((k) => input.headers.has(k))) {
+  const privateHeaders = pluginGatewayURL(input) ? MAGPIE_ONLY : [...MAGPIE_ONLY, ...PLUGIN_FORWARD_HEADERS]
+  if (input instanceof Request && privateHeaders.some((k) => input.headers.has(k))) {
     const h = new Headers(input.headers)
-    for (const k of MAGPIE_ONLY) h.delete(k)
+    for (const k of privateHeaders) h.delete(k)
     input = new Request(input, { headers: h })
   }
   if (init?.headers) {
     const h = new Headers(init.headers)
-    if (MAGPIE_ONLY.some((k) => h.has(k))) {
-      for (const k of MAGPIE_ONLY) h.delete(k)
+    if (privateHeaders.some((k) => h.has(k))) {
+      for (const k of privateHeaders) h.delete(k)
       init = { ...init, headers: h }
     }
   }
