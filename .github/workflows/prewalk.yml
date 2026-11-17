@@ -198,14 +198,15 @@ jobs:
           CANDIDATE_SHA: ${{ steps.prepare.outputs.prewalk_sha }}
         run: build/prewalk-sync.sh advance --sha "$CANDIDATE_SHA" --origin-url "$FORK_URL"
 
-      # last, and only now: prewalk-latest follows the candidate's digest
-      - name: Point prewalk-latest at the candidate image
+      # Publish both rolling tags only after the same candidate passed.
+      - name: Point latest and prewalk-latest at the candidate image
         env:
           CANDIDATE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          latest="$IMAGE:prewalk-latest"
-          docker buildx imagetools create -t "$latest" "$IMAGE@$CANDIDATE_DIGEST"
-          got=$(docker buildx imagetools inspect "$latest" --format '{{json .}}' | jq -er '.manifest.digest')
-          echo "candidate $CANDIDATE_DIGEST, latest $got"
-          [ "$CANDIDATE_DIGEST" = "$got" ]
+          docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:prewalk-latest" "$IMAGE@$CANDIDATE_DIGEST"
+          for tag in latest prewalk-latest; do
+            got=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .}}' | jq -er '.manifest.digest')
+            echo "candidate $CANDIDATE_DIGEST, $tag $got"
+            [ "$CANDIDATE_DIGEST" = "$got" ]
+          done

@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-`prewalk-maintenance` 保存定制实现，个人 Fork 的 `main` 承载默认分支定时任务。自动流程合并上游，不重写历史；验证的是合并后的同一候选提交。测试与镜像 smoke 成功后，流程才推进个人 Fork 分支和 `prewalk-latest`，不部署服务器。
+`prewalk-maintenance` 保存定制实现，个人 Fork 的 `main` 承载默认分支定时任务。自动流程合并上游，不重写历史；验证的是合并后的同一候选提交。测试与镜像 smoke 成功后，流程才推进个人 Fork 分支及同一 digest 的 `latest`、`prewalk-latest` 两个滚动标签，不自动部署服务器。按用户要求，生产 Compose 使用 `ghcr.io/rayenalex/magpie:latest`，不固定 digest；已有容器不会因标签更新而自行换镜像，仍须显式拉取并重建服务。
 
 来源关联继续遵守[宿主合同](../../../../docs/subsystems/provider-plugins.md)：关联不授予权限，内层使用独立服务身份；外层保留审计和客户端 usage，实际消耗只计一次。`groups:list` 继续受页面声明权限约束，只暴露 `id`、`name`、`ref`。
 

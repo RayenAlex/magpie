@@ -2,8 +2,11 @@
 
 This fork (RayenAlex/magpie) keeps `main` and `prewalk-maintenance` synced
 with yetone/magpie's `main` and publishes a checked image as
-`ghcr.io/rayenalex/magpie:prewalk-latest`. It is a maintenance pipeline
-only — nothing here deploys to production.
+`ghcr.io/rayenalex/magpie:latest`, with `prewalk-latest` retained as a
+compatibility alias. Both rolling tags follow the same verified digest.
+Production Compose uses `:latest`, not a pinned digest; a later update still
+requires pulling the tag and recreating the service. This pipeline does not
+automatically deploy to production.
 
 ## What runs, and in what order
 
@@ -48,8 +51,8 @@ on demand. One run does everything, in this order:
 6. **advance** (`build/prewalk-sync.sh advance --sha <sha>`) pushes that
    same sha to both `main` and `prewalk-maintenance` in one atomic,
    fast-forward-only push.
-7. `prewalk-latest` is moved to the candidate's digest
-   (`docker buildx imagetools create`), and the digests are compared.
+7. `latest` and `prewalk-latest` are moved to the candidate's digest
+   (`docker buildx imagetools create`), and each tag's digest is compared.
 
 Everything is one workflow because a push made with `GITHUB_TOKEN` triggers
 no other workflow: no later run would pick the merge up, so this run does
@@ -70,14 +73,14 @@ the checks itself.
   force-reset to an older ancestor can be advanced again. The guard covers
   ordinary concurrent advances, not remote-history rewrites.
 - **A merge conflict fails the run at once** and names the conflicted
-  files. Neither branch moves and `prewalk-latest` stays where it was.
+  files. Neither branch moves and both rolling tags stay where they were.
   Resolving it is manual, by design — see below.
 - **No change upstream is not an error:** the candidate is the branch tip
   (no empty commit is made), the checks rerun, the same sha is re-pushed
-  and `prewalk-latest` is re-pointed. This is how a broken first round gets
+  and both rolling tags are re-pointed. This is how a broken first round gets
   rebuilt and repaired.
 - **A failed candidate build may leave an orphaned `prewalk-<sha>` tag** in
-  GHCR. `prewalk-latest` is not moved before the advance step.
+  GHCR. Neither rolling tag is moved before the advance step.
 - The workflow has `if: github.repository == 'RayenAlex/magpie'`: the
   upstream (yetone/magpie) must never run it — it would merge the repo into
   itself and push over yetone's own branches and image. The one concurrency
