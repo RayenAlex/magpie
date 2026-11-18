@@ -120,7 +120,7 @@ line; agents connected to magpie lose it when it quits.
 | Air (JetBrains IDEs) | `~/.jetbrains/acp.json` (`%USERPROFILE%\.jetbrains\acp.json` on Windows; the Air plugin in 2026.2+ IDEs, shared with AI Assistant's custom agents) + `magpie-opencode.json` beside it | model (the same `Magpie` ACP agent as the Air app's, in Air's agent menu in the IDE; needs OpenCode installed; a `Magpie (WSL <distro>)` agent too for each running WSL distro that has OpenCode, for WSL projects) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
 | Crush        | `~/.config/crush/crush.json`      | large, small    |
-| DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie, its key `MAGPIE_GATEWAY_KEY` in `~/.dsh/.env` and dsh's own key store `~/.dsh/.credentials.yaml`, which the desktop app reads; on one of magpie's models its `web-search-deepseek` row also goes to the gateway, which searches with the model or Settings › Web search, unless dsh has a `DEEPSEEK_API_KEY` or a row of your own), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
+| DeepSeek Harness (dsh) | `~/.dsh/profiles/*/cordis.patch.yml` (`$DSH_HOME`; a custom provider, Magpie, its key `MAGPIE_GATEWAY_KEY` in `~/.dsh/.env` and dsh's own key store `~/.dsh/.credentials.yaml`, which the desktop app reads; on one of magpie's models its `web-search-deepseek` row also goes to the gateway, which searches with the model or Settings › Models › Web search, unless dsh has a `DEEPSEEK_API_KEY` or a row of your own), or `~/.dsh/config.yaml` before dsh 0.1.5 | model, effort |
 | Reasonix Studio (2.x, or a native Go `reasonix` 2.x / 1.39.x CLI) | `~/.reasonix/config.toml` + `.env` (`%APPDATA%/reasonix` on Windows; `$REASONIX_HOME`) | model (Executor), planner (Plan), effort (a dedicated `magpie` provider, shared by Studio and the native CLI) |
 | Command Code | `~/.commandcode/settings.json` (+ `providers.json`) | model |
 | fx           | `~/.fx/settings.json`             | model (a keyless `magpie` provider) |
@@ -168,6 +168,7 @@ line; agents connected to magpie lose it when it quits.
 | Kun          | `~/.kun/data/model-connections.v2.json` (`$KUN_DATA_DIR`), changed through its runtime's admin API (`baseUrl` and `runtimeToken` of `runtime.json` in the same folder) while it runs | model (a `magpie` connection in Settings > Providers: HTTP, OpenAI chat completions at the gateway's `/v1`, with Kun's own key and the models picked for Kun; the model picked is Kun's default. Kun has to be running to connect or disconnect it) |
 | OpenHanako   | `~/.hanako/provider-catalog.json` + `agents/<id>/config.yaml` (`$HANA_HOME`; its local API while it runs) | model (the primary agent's; magpie's models as a provider) |
 | AtomCode     | `~/.atomcode/config.toml` (`$ATOMCODE_HOME`) | model, effort (a `magpie` provider account, one model table per catalog model as its own sign-in writes) |
+| Open Code Review | `~/.opencodereview/config.json` | model (a `magpie` custom provider made the one in use; its Claude Code, Codex, Cursor, Kimi Code and OpenCode plugins run the same `ocr`) |
 | Snow CLI     | `~/.snow/profiles/magpie.json` (`$SNOW_CONFIG_DIR`), made the active profile and copied to `config.json` | model (the user's other profiles' models too; Snow App takes the profile in with "Sync Snow CLI API config") |
 | Alma         | Alma's local API (`localhost:23001`, while Alma runs; alma-server's data in `$ALMA_DATA_DIR`, `$XDG_DATA_HOME/alma` or `~/.local/share/alma` on Linux) | model (Alma's default; magpie's models as a provider), and Image Generation's model when it is Auto: the one magpie draws with |
 | Shelley      | Shelley's local socket (`~/.config/shelley/shelley.sock`, `$XDG_CONFIG_HOME/shelley`, `$SHELLEY_SOCKET`; while `shelley serve` runs) | model (the default profile's; magpie's models as Shelley custom models of type `openai` at the gateway's `/v1` with Shelley's own key, one per model picked; the profile's model and thinking level are stashed and put back on Disconnect, and magpie's custom models go) |
@@ -417,6 +418,17 @@ agent's own User-Agent" unticked) sends magpie's in its place;
 and a vendor whose own client magpie goes as (OpenCode, Cline, Kilo) keep
 the User-Agent their sign-in sends, and don't take it.
 
+`magpie provider set <id> search=yes` (the editor's Advanced › Web search,
+"Searches the web by itself") is for a relay in front of Anthropic's or
+OpenAI's own API that runs web search itself. Claude Code's WebSearch,
+Codex's `web_search` tool and Codex's web.run (its `POST /v1/alpha/search`)
+then go to the relay as they were sent, with its key, instead of through
+magpie's search; the relay's answer goes back as it came. If the relay's
+search fails, magpie searches in its place and says why. In a routing group
+the member a turn would go to first decides. `search=no`, the default,
+keeps magpie's search; Settings › Models › Web search set to magpie's
+search for models that search by themselves wins over it.
+
 `magpie usage` (and `--csv`) takes `today`, `7d`, `30d` or `all`, each from a
 local midnight, or a window ending now: `--last 24h` (any Go duration, `90m`)
 or `--days 1.5`; the CSV then holds that window's calls only (#2075).
@@ -465,12 +477,16 @@ words (`stop`, `tool_calls`, `end_turn`, a Responses reply's
 page shows it as Upstream stop reason.
 
 **Output speed** (tok/s on the Usage and Routing pages, `magpie usage`) is
-output tokens over the time after the first token, summed per request: the
+all output tokens the vendor counted, reasoning and tool calls included, over
+the time from the first output to the last, summed per request: the
 tokens of every timed request over the sum of their windows, so concurrent
-subagents never add up. A reply that reasoned counts only its answer, from its
-first text (`usage.DecodeOf`): hidden reasoning is written before the stream
-shows anything, so counting it in a window that starts after it read
-gpt-6.1-sol at hundreds of tok/s. A reply that reasoned and then wrote only
+subagents never add up. The first output is the earlier of the first content
+and the first sign the stream gave of reasoning (a reasoning item's or a
+thinking block's start, or reasoning deltas over 100 ms or more; a summary is
+no sign). A reply that reasoned with no sign of when counts only its answer,
+from its first text (`usage.DecodeOf`): its reasoning was written before the
+stream showed anything, so counting it in a window that starts after it read
+gpt-6.1-sol at hundreds of tok/s. Such a reply that then wrote only
 tool calls, one not streamed, and a burst (under 100 ms, or over 10,000 tok/s)
 tell no speed. So does a reply its vendor held back and let go in a burst at
 its end, however long the burst took to come: one whose content came in under
@@ -3816,8 +3832,11 @@ expose it publicly without gateway-key authentication.
 
 Such a page is in **gateway mode**: it shows Sessions, Library, Providers,
 Routing, Gateway, Usage, Masking, Plugins and Settings, with no Agents tab.
-The Library has its MCP servers alone, with the MCP router: other
-computers' apps connect at the router's address with a gateway key.
+The Library has its MCP servers, with the MCP router: other
+computers' apps connect at the router's address with a gateway key. Its
+Skills and Instructions are there too, for a magpie on another computer
+that adds this one as an "Another computer's magpie" provider with Use its skills and
+prompts on: that magpie takes them and gives them to its own agents.
 Sessions lists only the sessions of other computers' agents that came
 through this gateway, never this machine's agents' session files
 ([gateway sessions](subsystems/gateway-sessions.md)). Settings leaves out what is written into this machine's agents (provider in
@@ -4128,6 +4147,7 @@ magpie backup --no-keys ~/b.magpie-backup   # the same with no API keys in it
 magpie restore magpie.magpie-backup         # on the other machine
 magpie restore --no-agents b.magpie-backup  # providers, settings, profiles; agents left as they are
 magpie restore --no-library b.magpie-backup # the library here left as it is
+magpie backup --no-usage ~/b.magpie-backup  # no usage history in it
 ```
 
 A backup holds your providers (with their keys, unless `--no-keys`), the
@@ -4155,7 +4175,11 @@ name the ones still to sign in to. The plugins added from npm or git come
 along too and are installed where it is put back (one added from a folder
 stays on its machine; without keys, an option whose name looks like a key
 is left out); a plugin's sign-in is not carried, a plugin already there is
-left as it is, and one removed on one machine stays on the others. Piped
+left as it is, and one removed on one machine stays on the others. The usage history comes
+along too (unless `--no-usage`): every call in `usage.jsonl`, gzipped, and
+the quota cards' history. Restoring merges it with the history there: a call
+already there is never added again, so restoring the same backup twice counts
+nothing twice (`magpie restore --no-usage` leaves it out). Piped
 in, the passphrase is the first line of stdin.
 
 ### Keeping machines in sync
@@ -4608,7 +4632,13 @@ and models to look after first, by magpie's own ids only:
   installed and on (npm names, or `github:owner/repo` for a repository
   tagged `magpie-plugin`; never a folder, a private repository or an
   unlisted package), with the same id, so Discover can say how many use
-  each (the ids that reported it in 7 days). A like on a plugin's page
+  each (the ids that reported it in 7 days). The same report names the
+  Library's MCP servers that an agent is given and that the market lists
+  from what ships with magpie (featured, or the registry snapshot), by
+  their market ids only (`context7`, `io.github.owner/name`; at most 50),
+  so the market can put the most used first; a server of the user's own,
+  one found only by a search, and its address, command or keys never go
+  (`library.PublicServers`). A like on a plugin's page
   goes there too, only for a plugin installed here, and is kept in
   `~/.config/magpie/plugin-likes.json`. The code is
   [internal/stats/plugins.go](../internal/stats/plugins.go) and
