@@ -10,6 +10,65 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
+func TestPluginForwardScoutReplayReceipt(t *testing.T) {
+	for _, mode := range []string{"selected", "unfinished", "foreign", "business-wins", "expired", "error", "missing"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := &pluginForward{}
+			ctx := context.WithValue(t.Context(), pluginForwardKey{}, parent)
+			headers := http.Header{}
+			done := tellPluginForward(ctx, provider.Provider{ID: "wrapper"}, http.Header{}, headers)
+			defer done()
+			request := func(kind string) *http.Request {
+				r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+				r.RemoteAddr = "127.0.0.1:1122"
+				r.Header.Set(pluginRequestHeader, headers.Get(pluginRequestHeader))
+				r.Header.Set(pluginCallHeader, kind)
+				r = r.WithContext(access.WithIdentity(r.Context(), access.Identity{KeyID: "service"}))
+				r, _ = acceptPluginForward(r, caller{})
+				return beginPluginForward(r)
+			}
+			child := request("prewalk_scout")
+			reply := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
+			tellPluginScoutReceipt(child, reply.Header)
+			const receiptHeader = "X-Magpie-Plugin-Replay-Token"
+			if reply.Header.Get(receiptHeader) == "" || parent.wraps("wrapper") || pluginForwardKind(child, "") != "prewalk_classify" {
+				t.Fatal("scout did not obtain a receipt independently of business forwarding")
+			}
+			if mode != "unfinished" {
+				finishPluginScoutReceipt(child)
+			}
+			switch mode {
+			case "foreign":
+				other := http.Header{}
+				defer tellPluginForward(ctx, provider.Provider{ID: "wrapper"}, http.Header{}, other)()
+				headers.Set(pluginRequestHeader, other.Get(pluginRequestHeader))
+				finishPluginScoutReceipt(request("prewalk_scout"))
+			case "business-wins":
+				request("business")
+			case "expired":
+				done()
+			case "error":
+				reply.StatusCode = http.StatusBadGateway
+			case "missing":
+				reply.Header.Del(receiptHeader)
+			}
+			acceptPluginScoutReplay(headers.Get(pluginRequestHeader), reply)
+			if reply.Header.Get(receiptHeader) != "" {
+				t.Fatal("private receipt was not stripped")
+			}
+			if got, want := parent.wraps("wrapper"), mode == "selected" || mode == "business-wins"; got != want {
+				t.Fatalf("deduplicated = %v, want %v", got, want)
+			}
+			if mode == "selected" && request("business").Context().Value(pluginChildKey{}) != nil {
+				t.Fatal("selected scout left the business slot available")
+			}
+			if mode != "selected" && mode != "business-wins" && mode != "expired" && request("business").Context().Value(pluginChildKey{}) == nil {
+				t.Fatal("rejected scout consumed the business slot")
+			}
+		})
+	}
+}
+
 func TestPluginForwardGrantBoundaries(t *testing.T) {
 	t.Setenv("MAGPIE_TRUST_PROXY", "0")
 	parent := &pluginForward{}
@@ -40,6 +99,9 @@ func TestPluginForwardGrantBoundaries(t *testing.T) {
 		identified, proxy  bool
 	}{
 		{"remote", "203.0.113.2:10", "business", true, false},
+		{"remote-scout", "203.0.113.2:10", "prewalk_scout", true, false},
+		{"unidentified-scout", "127.0.0.1:10", "prewalk_scout", false, false},
+		{"proxy-scout", "127.0.0.1:10", "prewalk_scout", true, true},
 		{"unidentified", "127.0.0.1:10", "business", false, false},
 		{"proxy", "127.0.0.1:10", "business", true, true},
 		{"unknown-purpose", "127.0.0.1:10", "hide", true, false},

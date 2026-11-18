@@ -176,6 +176,8 @@ So `forwardOnce` sets two more headers on every plugin request, each dropped fir
 
 内层业务记录和路由判断使用原客户端来源，记账使用原客户端会话及子代理标识；插件显式指定的路由会话保留，与记账会话分离，避免破坏组递归哨兵。已核验的外层账本带 `operation: provider_wrapper`，保留真实 usage、入口身份和入口预算累计，但不再次计入实际消耗、会话聚合及上下文统计。内层保持服务身份和真实模型费用。分类和健康判断通过同一凭证分别声明 `prewalk_classify`、`prewalk_health`，记录为插件辅助调用并独立累计消耗，不触发包装去重。
 
+缓冲探路的插件使用 `x-magpie-plugin-call: prewalk_scout`。内层仍按 `prewalk_classify` 计量，不提前认领业务来源；宿主给本次通过鉴权的回环子请求签发私有 `X-Magpie-Plugin-Replay-Token`。只有内层成功完成用量记录、插件在同次 fetch 返回该回执且未走业务认领时，宿主才把外层标为 wrapper。选中重放不追加模型请求；丢弃回复时仍由接手模型正常认领业务来源。响应回执在返回客户端前移除，也不作为出站请求头转发。
+
 未配合的插件和旧宿主维持原行为；既有账本不迁移，也不按时间、token 或模型相同推测关联。验证：`TestPluginForwardGrantBoundaries`、usage/budget 的 `TestProviderWrapper*`、GUI 的 `TestContextCountsProviderForwardingChildOnce`，以及 Prewalk 仓库的实际插件网关集成测试。
 
 ## Whether another candidate follows

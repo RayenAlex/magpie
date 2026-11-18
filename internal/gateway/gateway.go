@@ -2528,6 +2528,7 @@ func estimate(req *Request) int {
 // serve routes one parsed-enough request to its provider.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
 	r = beginPluginForward(r)
+	tellPluginScoutReceipt(r, w.Header())
 	start := time.Now()
 	// a client's "off" is magpie's none, for every route and check below
 	// that reads the body's effort (plugins#334)
@@ -5785,6 +5786,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 		withBodies(&rec, &call)
 		appendUsage(r, rec)
+		if call.Status == http.StatusOK && call.Error == "" && r.Context().Err() == nil {
+			finishPluginScoutReceipt(r)
+		}
 		if call.Status < 400 {
 			// what its model searched with its provider's own tool
 			logNativeSearches(r.Context(), call.Usage.searches, start, call.Agent, call.Provider, where, model)
@@ -6550,6 +6554,15 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	// the bytes go on the wire whether the vendor answers or not, counted
 	// for the request's ledger row (#4456)
 	sentUp(ctx, sent, len(body))
+	send := func(r *http.Request) (*http.Response, error) {
+		res, err := p.Do(s.client, r)
+		grantToken := ""
+		if p.IsPlugin() && err == nil && r.Context().Err() == nil {
+			grantToken = r.Header.Get(pluginRequestHeader)
+		}
+		acceptPluginScoutReplay(grantToken, res)
+		return res, err
+	}
 	// a request asked again in the same ask (RetryOneAuth and the others
 	// below) goes on the wire again too, as long as it went
 	again := func(r *http.Request) (*http.Response, error) {
@@ -6558,10 +6571,10 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			n = int(r.ContentLength)
 		}
 		sentUp(ctx, n, len(body))
-		res, err := p.Do(s.client, r)
+		res, err := send(r)
 		return gotDown(ctx, res), err
 	}
-	res, err := p.Do(s.client, req)
+	res, err := send(req)
 	// what comes back is counted as it is read, as what went is (#4456)
 	res = gotDown(ctx, res)
 	if dict != nil {

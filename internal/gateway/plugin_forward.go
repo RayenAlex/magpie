@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"sync"
@@ -14,6 +16,8 @@ import (
 const (
 	pluginRequestHeader = "X-Magpie-Plugin-Token"
 	pluginCallHeader    = "X-Magpie-Plugin-Call"
+	pluginReplayHeader  = "X-Magpie-Plugin-Replay-Token"
+	pluginScoutCall     = "prewalk_scout"
 )
 
 type pluginForwardKey struct{}
@@ -45,11 +49,18 @@ type pluginForwardGrant struct {
 	caller                               caller
 	session, subagent, parentAgent, kind string
 	claimed                              atomic.Bool
+	scout                                atomic.Pointer[pluginScoutReceipt]
+}
+
+type pluginScoutReceipt struct {
+	token   string
+	counted atomic.Bool
 }
 
 type pluginForwardChild struct {
 	grant *pluginForwardGrant
 	kind  string
+	scout *pluginScoutReceipt
 }
 
 var pluginForwards sync.Map
@@ -60,6 +71,7 @@ func acceptPluginForward(r *http.Request, c caller) (*http.Request, caller) {
 	token, kind := r.Header.Get(pluginRequestHeader), r.Header.Get(pluginCallHeader)
 	r.Header.Del(pluginRequestHeader)
 	r.Header.Del(pluginCallHeader)
+	r.Header.Del(pluginReplayHeader)
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || !net.ParseIP(host).IsLoopback() || proxied(r) || access.Caller(r.Context()).KeyID == "" {
 		return r, c
@@ -69,6 +81,23 @@ func acceptPluginForward(r *http.Request, c caller) (*http.Request, caller) {
 		return r, c
 	}
 	g := v.(*pluginForwardGrant)
+	var scout *pluginScoutReceipt
+	if kind == pluginScoutCall {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			return r, c
+		}
+		if !g.claimed.Load() && g.scout.Load() == nil {
+			var secret [24]byte
+			if _, err := rand.Read(secret[:]); err == nil {
+				candidate := &pluginScoutReceipt{token: hex.EncodeToString(secret[:])}
+				if g.scout.CompareAndSwap(nil, candidate) {
+					scout = candidate
+				}
+			}
+		}
+		// Scout calls still count in the existing auxiliary classification lane.
+		kind = "prewalk_classify"
+	}
 	if kind != "business" && kind != "prewalk_classify" && kind != "prewalk_health" {
 		return r, c
 	}
@@ -106,7 +135,7 @@ func acceptPluginForward(r *http.Request, c caller) (*http.Request, caller) {
 			r.Header.Del(h)
 		}
 	}
-	return r.WithContext(context.WithValue(r.Context(), pluginChildKey{}, pluginForwardChild{g, kind})), c
+	return r.WithContext(context.WithValue(r.Context(), pluginChildKey{}, pluginForwardChild{grant: g, kind: kind, scout: scout})), c
 }
 
 // beginPluginForward gives each request its own accounting state. A business
@@ -116,6 +145,42 @@ func beginPluginForward(r *http.Request) *http.Request {
 		child.grant.parent.mark(child.grant.provider)
 	}
 	return r.WithContext(context.WithValue(r.Context(), pluginForwardKey{}, &pluginForward{}))
+}
+
+// A receipt is returned only to the authenticated, loopback scout request.
+// It is usable after the child has reached the end of successful accounting.
+func tellPluginScoutReceipt(r *http.Request, h http.Header) {
+	if child, ok := r.Context().Value(pluginChildKey{}).(pluginForwardChild); ok && child.scout != nil {
+		h.Set(pluginReplayHeader, child.scout.token)
+	}
+}
+
+func finishPluginScoutReceipt(r *http.Request) {
+	if child, ok := r.Context().Value(pluginChildKey{}).(pluginForwardChild); ok && child.scout != nil {
+		child.scout.counted.Store(true)
+	}
+}
+
+// Consume a selected response before closing the parent grant. Unlike a
+// business call, a discarded scout never claims the parent or its source.
+func acceptPluginScoutReplay(grantToken string, res *http.Response) {
+	if res == nil {
+		return
+	}
+	token := res.Header.Get(pluginReplayHeader)
+	res.Header.Del(pluginReplayHeader)
+	if token == "" || res.StatusCode != http.StatusOK {
+		return
+	}
+	value, ok := pluginForwards.Load(grantToken)
+	if !ok {
+		return
+	}
+	grant := value.(*pluginForwardGrant)
+	receipt := grant.scout.Load()
+	if receipt != nil && receipt.token == token && receipt.counted.Load() && grant.claimed.CompareAndSwap(false, true) {
+		grant.parent.mark(grant.provider)
+	}
 }
 
 func pluginForwardKind(r *http.Request, fallback string) string {
@@ -140,8 +205,9 @@ func pluginWrapped(ctx context.Context, id string) bool {
 	return ok && f.wraps(id)
 }
 
-// tellPluginForward grants correlation until the plugin returns its response
-// headers. Its child requests must begin before then; the token is never saved.
+// tellPluginForward grants correlation for one plugin fetch. Child requests
+// begin before it returns headers, and any selected replay receipt is consumed
+// before the grant is removed.
 func tellPluginForward(ctx context.Context, p provider.Provider, in http.Header, h http.Header) func() {
 	f, ok := ctx.Value(pluginForwardKey{}).(*pluginForward)
 	if !ok {
