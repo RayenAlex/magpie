@@ -6,9 +6,15 @@ name: Prewalk sync
 # both fork branches and move the prewalk-latest image. Nothing here deploys
 # anything.
 #
-# The whole pipeline is one workflow on purpose: a push made with
-# GITHUB_TOKEN triggers no other workflow, so no later run would pick the
-# merge up — this run does the checks itself, before and after nothing.
+# Checks and publication are two jobs of one workflow. The sync job never
+# holds write access to the branches; the publish job alone mints the
+# fork's app token, the only credential that may push a candidate which
+# changes workflow files (GITHUB_TOKEN has no workflows permission, and
+# GitHub rejects such a push with "refusing to allow a GitHub App to
+# create or update workflow files without `workflows` permission"). The
+# publish app's own pushes are this pipeline's output: their runs are
+# skipped and kept out of the real sync's concurrency group, while other
+# workflows treat them like any push.
 # See docs/prewalk-maintenance.md for the rules and the failure edges.
 
 on:
@@ -19,7 +25,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: prewalk-sync
+  # a run the publish app's own push started is skipped, so it gets its
+  # own group and never queues ahead of (or beside) a real sync
+  group: prewalk-${{ (github.event_name == 'push' && vars.PREWALK_SYNC_BOT != '' && github.actor == vars.PREWALK_SYNC_BOT) && 'app-push' || 'sync' }}
   cancel-in-progress: false
 
 env:
@@ -31,18 +39,22 @@ env:
 jobs:
   sync:
     # a hard guard: on yetone/magpie this would merge the repo into itself
-    # and push over yetone's own branches and image
-    if: github.repository == 'RayenAlex/magpie'
+    # and push over yetone's own branches and image. The publish app's own
+    # pushes are skipped too: they are this pipeline's output, not input.
+    if: github.repository == 'RayenAlex/magpie' && (github.event_name != 'push' || vars.PREWALK_SYNC_BOT == '' || github.actor != vars.PREWALK_SYNC_BOT)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
-      contents: write  # advance pushes main and prewalk-maintenance
+      contents: read  # checks only; publish advances the branches
       packages: write  # the candidate image goes to ghcr.io
+    outputs:
+      candidate_sha: ${{ steps.prepare.outputs.prewalk_sha }}
+      candidate_digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # the merge needs the full history
-          persist-credentials: true  # advance pushes with GITHUB_TOKEN
+          persist-credentials: false  # this job never writes to the fork
 
       # prepare merges upstream main into the fork's prewalk-maintenance
       # (or main on a fresh fork), leaves HEAD on the candidate and writes
@@ -191,17 +203,122 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # advance fast-forwards both fork branches to the same verified sha
-      # the checks ran on; a branch that moved ahead rejects the run
-      - name: Advance the fork branches to the verified candidate
-        env:
-          CANDIDATE_SHA: ${{ steps.prepare.outputs.prewalk_sha }}
-        run: build/prewalk-sync.sh advance --sha "$CANDIDATE_SHA" --origin-url "$FORK_URL"
+      # The candidate is on no remote yet, so it travels to publish as a
+      # self-contained git bundle: one artifact, one sha, no credentials.
+      - name: Hand the verified candidate to publish (git bundle)
+        run: |
+          set -euo pipefail
+          git bundle create "$RUNNER_TEMP/prewalk-candidate.bundle" HEAD
+          git bundle verify "$RUNNER_TEMP/prewalk-candidate.bundle" >/dev/null
+      - uses: actions/upload-artifact@v6
+        with:
+          name: prewalk-candidate-bundle
+          path: ${{ runner.temp }}/prewalk-candidate.bundle
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true  # a re-run of sync replaces the artifact
 
-      # Publish both rolling tags only after the same candidate passed.
+  publish:
+    needs: sync
+    if: github.repository == 'RayenAlex/magpie'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: prewalk-publish
+    permissions:
+      contents: read  # the checkout of the trusted workflow revision
+      packages: write  # the rolling image tags on ghcr.io
+    steps:
+      # Nothing from the candidate runs here: its tree arrives as data in
+      # the bundle, and the advance script is the trigger revision's own
+      # copy, kept outside the candidate's repository.
+      - name: Download the verified candidate (git bundle)
+        uses: actions/download-artifact@v7
+        with:
+          name: prewalk-candidate-bundle
+          path: ${{ runner.temp }}
+
+      # Checkout with a plain, short-lived read token whose expiry is tied
+      # to this job; the app installation token is minted only afterwards.
+      - name: Check out the trusted workflow revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Restore the verified candidate from the bundle
+        id: restore
+        env:
+          CANDIDATE_SHA: ${{ needs.sync.outputs.candidate_sha }}
+          CANDIDATE_DIGEST: ${{ needs.sync.outputs.candidate_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "bad candidate sha: $CANDIDATE_SHA"; exit 1; }
+          [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad candidate digest: $CANDIDATE_DIGEST"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/trusted" "$RUNNER_TEMP/candidate"
+          # the advance script of the revision this run was started by,
+          # kept outside the candidate tree
+          cp build/prewalk-sync.sh "$RUNNER_TEMP/trusted/prewalk-sync.sh"
+          git init --quiet "$RUNNER_TEMP/candidate"
+          git -C "$RUNNER_TEMP/candidate" fetch --quiet "$RUNNER_TEMP/prewalk-candidate.bundle" HEAD
+          got=$(git -C "$RUNNER_TEMP/candidate" rev-parse FETCH_HEAD)
+          [ "$got" = "$CANDIDATE_SHA" ] || { echo "bundle HEAD $got is not the verified candidate $CANDIDATE_SHA"; exit 1; }
+          git -C "$RUNNER_TEMP/candidate" checkout --quiet --detach "$CANDIDATE_SHA"
+
+      # The only credential that may push workflow files: a GitHub App
+      # installation token with workflows permission, scoped to this
+      # repository, minted fresh for this step's callers and short-lived.
+      - name: Mint the fork app's installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.PREWALK_SYNC_APP_ID }}
+          private-key: ${{ secrets.PREWALK_SYNC_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
+      - name: Check the app identity against PREWALK_SYNC_BOT
+        env:
+          PREWALK_SYNC_BOT: ${{ vars.PREWALK_SYNC_BOT }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          [ -n "$PREWALK_SYNC_BOT" ] || { echo "PREWALK_SYNC_BOT (repository variable) is not set; see docs/prewalk-maintenance.md"; exit 1; }
+          [ "${APP_SLUG}[bot]" = "$PREWALK_SYNC_BOT" ] \
+            || { echo "token app ${APP_SLUG}[bot] is not $PREWALK_SYNC_BOT"; exit 1; }
+
+      # advance fast-forwards both fork branches to the same verified sha
+      # the checks ran on; a branch that moved ahead rejects the run. The
+      # token reaches git only through process-level environment config
+      # matched to the fork's exact HTTPS URL: nothing is written to disk,
+      # to the remote URL, or to git's config files.
+      - name: Advance the fork branches to the verified candidate
+        id: advance
+        working-directory: ${{ runner.temp }}/candidate
+        env:
+          CANDIDATE_SHA: ${{ needs.sync.outputs.candidate_sha }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          [ -n "$APP_TOKEN" ] || { echo "GitHub App installation token is empty: PREWALK_SYNC_APP_ID / PREWALK_SYNC_APP_PRIVATE_KEY are not configured in the prewalk-publish environment"; exit 1; }
+          export GIT_TERMINAL_PROMPT=0
+          basic=$(printf 'x-access-token:%s' "$APP_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$basic"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${FORK_URL}.extraheader"
+          export GIT_CONFIG_VALUE_0="Authorization: Basic $basic"
+          "$RUNNER_TEMP/trusted/prewalk-sync.sh" advance --sha "$CANDIDATE_SHA" --origin-url "$FORK_URL"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Publish both rolling tags only after the advance succeeded.
       - name: Point latest and prewalk-latest at the candidate image
         env:
-          CANDIDATE_DIGEST: ${{ steps.image.outputs.digest }}
+          CANDIDATE_DIGEST: ${{ needs.sync.outputs.candidate_digest }}
         run: |
           [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:prewalk-latest" "$IMAGE@$CANDIDATE_DIGEST"

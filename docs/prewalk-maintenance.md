@@ -48,15 +48,29 @@ on demand. One run does everything, in this order:
    the candidate tag `prewalk-<sha>`, built from the same candidate sha.
    Publication uses the build output digest, not a later tag lookup; GHCR
    tags themselves are mutable and a repeat build can replace this tag.
-6. **advance** (`build/prewalk-sync.sh advance --sha <sha>`) pushes that
-   same sha to both `main` and `prewalk-maintenance` in one atomic,
-   fast-forward-only push.
-7. `latest` and `prewalk-latest` are moved to the candidate's digest
+6. The sync job hands the candidate to the publish job as a self-contained
+   git bundle (a short-lived artifact) with its sha and the build digest.
+   The sync job holds no write access to the branches at all.
+7. **advance** (`build/prewalk-sync.sh advance --sha <sha>`, run by the
+   publish job) pushes that same sha to both `main` and `prewalk-maintenance`
+   in one atomic, fast-forward-only push. The push uses the fork's GitHub
+   App installation token — `GITHUB_TOKEN` cannot push a candidate that
+   changes workflow files (GitHub rejects it without `workflows`
+   permission, which `GITHUB_TOKEN` has no field for). The advance script
+   is the trigger revision's own copy; nothing from the candidate tree
+   runs in the publish job.
+8. `latest` and `prewalk-latest` are moved to the candidate's digest
    (`docker buildx imagetools create`), and each tag's digest is compared.
 
-Everything is one workflow because a push made with `GITHUB_TOKEN` triggers
-no other workflow: no later run would pick the merge up, so this run does
-the checks itself.
+The checks and the publication are two jobs of one workflow on purpose:
+the sync job runs the candidate's code (its tests, its Docker build) and
+so never holds the app's credentials; the publish job alone mints the
+fork's app token, and only after every check passed. A push made with
+that app token can trigger other workflows, unlike one made with
+`GITHUB_TOKEN` — so this workflow skips its own runs for the app's
+pushes (their runs would be no-ops beside the run that just finished),
+and those skipped runs sit in their own concurrency group, out of the
+real sync's way.
 
 ## Branch rules and failure edges
 
@@ -83,9 +97,11 @@ the checks itself.
   GHCR. Neither rolling tag is moved before the advance step.
 - The workflow has `if: github.repository == 'RayenAlex/magpie'`: the
   upstream (yetone/magpie) must never run it — it would merge the repo into
-  itself and push over yetone's own branches and image. The one concurrency
-  group `prewalk-sync` does not cancel in progress, so a run either
-  finishes or queues; a cancelled run is not a pass.
+  itself and push over yetone's own branches and image. A run the publish
+  app's own push starts is skipped (it is this pipeline's output, not
+  input) and sits in its own concurrency group; the real sync's group does
+  not cancel in progress, so a run either finishes or queues; a cancelled
+  run is not a pass.
 
 ## Resolving a conflict by hand
 
@@ -101,9 +117,25 @@ resolves it.
 
 - **Enable Actions by hand** once (Actions tab → enable). A fork's
   workflows are disabled until then; nothing runs before that.
-- The workflow's own `permissions` grant `contents: write` (advance pushes
-  the branches) and `packages: write` (GHCR). No PAT, no extra secrets:
-  everything uses `GITHUB_TOKEN`.
+- **Create the fork's publish GitHub App** (Settings → Developer settings →
+  GitHub Apps; it belongs to the owner's account, no organization needed).
+  Give it read and write on **Contents** and **Workflows** — the branch
+  push needs Workflows whenever the candidate changes a file under
+  `.github/workflows`, which `GITHUB_TOKEN` cannot do. Install it on
+  **this fork only**, never anywhere else.
+- **Configure the `prewalk-publish` environment** (Settings →
+  Environments): add the secrets `PREWALK_SYNC_APP_ID` (the App's numeric
+  id) and `PREWALK_SYNC_APP_PRIVATE_KEY` (its private key). Restrict the
+  environment's deployment branches to `main` and `prewalk-maintenance`,
+  and enable required reviewers there if you want a person to approve
+  each advance — remember the App can change workflow files, so anything
+  upstream syncs in under `.github/workflows` is worth a look at approve
+  time.
+- **Set the repository variable `PREWALK_SYNC_BOT`** (Settings → Secrets
+  and variables → Actions → Variables) to the App's login, which is its
+  slug followed by `[bot]`. The publish job refuses to run with a token
+  from any other App, and pushes from this bot alone are skipped as
+  re-triggered output.
 - **Scheduled runs happen only on the repository's default branch.** Keep
   the default branch on `main` for the 6-hour sync to fire.
 - **GHCR visibility is not set automatically.** The first push creates the
@@ -112,6 +144,11 @@ resolves it.
   decision, not something this pipeline does.
 - **Failure notifications** for scheduled runs come from your GitHub
   notification settings (Watching → Actions), not from the workflow.
+- **A new run must be started after deploying this workflow's changes** —
+  a re-run of an old run keeps the old workflow definition. Push the fix
+  (or use workflow_dispatch); the run itself is the acceptance test:
+  sync green, both branches at the candidate sha, both rolling tags at
+  the build digest, and the app's own push showing as skipped.
 
 ## Local tests
 
@@ -123,8 +160,11 @@ without a maintenance branch, and a candidate whose HEAD moved past its sha.
 A branch force-reset to an older ancestor is a remote-history rewrite,
 outside this pipeline's boundary.
 
-What was verified locally: the script tests above (37 checks) and the YAML
-parsing of the workflow. What was not: the workflow itself on GitHub
-runners — the first run on the fork (schedule or `workflow_dispatch`), the
-GHCR push, and the cloud smoke test are unverified until Actions is enabled
-and the first run is green.
+What was verified locally: the script tests above (37 checks), the YAML
+contract checks of the workflow (job permissions, credential wiring,
+publish order), the publish Bash blocks' syntax, and the restore/advance
+steps against a throwaway repository with a fake token. What was not: the
+workflow itself on GitHub runners — the app installation, the
+`workflows`-permission push, the GHCR publication, and the bot-push skip
+are unverified until the first new run (not a re-run) after deployment is
+green.
